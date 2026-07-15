@@ -1,7 +1,11 @@
+import logging
+
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from module.conf import DATA_PATH
+
+logger = logging.getLogger(__name__)
 
 # The whole application runs on the async engine now. DATA_PATH (the sync
 # sqlite URL) is kept only to derive the async URL and for the migration tests,
@@ -23,10 +27,22 @@ def _set_sqlite_pragmas_async(dbapi_conn, connection_record):
     aiosqlite connections now write concurrently, so WAL (readers never block
     the writer) plus a busy_timeout (a contended write waits instead of raising
     immediately) are required to avoid ``database is locked``.
+
+    On old Linux kernels (3.x) with Docker overlay filesystem, WAL mode's shm
+    file creation may fail with ``disk I/O error``. We fall back to TRUNCATE
+    journal mode in that case.
     """
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.execute("PRAGMA journal_mode=WAL")
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        dbapi_conn.rollback()
+        cursor.execute("PRAGMA journal_mode=TRUNCATE")
+        logger.warning(
+            "WAL journal mode not supported (disk I/O error on old kernel?); "
+            "falling back to TRUNCATE mode. Concurrency may be reduced."
+        )
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
